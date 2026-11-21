@@ -1,4 +1,3 @@
-import io
 import joblib
 import numpy as np
 import pandas as pd
@@ -8,15 +7,15 @@ import plotly.graph_objects as go
 st.set_page_config(page_title="PTI Lab Real-Time Intelligence", page_icon="🧪", layout="wide")
 
 # ==============================================================================
-# 1. KONFIGURASI KONEKSI GOOGLE SHEETS & MODEL TERLATIH
+# 1. KONFIGURASI KONEKSI GOOGLE SHEETS & MODEL TERLATIH (DARI COLAB)
 # ==============================================================================
-# Ganti dengan ID Google Sheets Anda dari Langkah 2!
 DEFAULT_GSHEET_ID = "1BRbB4ucQJffZbDmAevURXK9zRn8sNe43"
+MODEL_PATH = "pti_models_20.joblib"
 
 @st.cache_resource
 def load_trained_models():
-    # Langsung memuat otak model yang sudah dilatih di Google Colab (tanpa retrain)
-    return joblib.load("pti_models_20.joblib")
+    # Langsung memuat otak model yang dilatih di Google Colab (murni inferensi)
+    return joblib.load(MODEL_PATH)
 
 @st.cache_data(ttl=10)
 def fetch_realtime_gsheet(sheet_id):
@@ -56,20 +55,30 @@ if st.sidebar.button("🔄 Sinkronkan Data Terbaru (Apps Script)", type="primary
     st.cache_data.clear()
     st.rerun()
 
+if st.sidebar.button("📦 Muat Ulang File Model (.joblib)", use_container_width=True):
+    st.cache_resource.clear()
+    st.rerun()
+
 try:
     artifact = load_trained_models()
     models = artifact["models"]
     f_cols = artifact["feature_cols"]
     horizon = artifact["horizon"]
-    importances = artifact["importances"]
 except FileNotFoundError:
-    st.error("File `pti_models_20.joblib` tidak ditemukan! Letakkan file hasil download dari Colab di folder yang sama.")
+    st.error("File `pti_models_20.joblib` tidak ditemukan di repositori GitHub!")
+    st.stop()
+except Exception as e:
+    st.error(
+        f"Gagal memuat `pti_models_20.joblib` karena perbedaan versi Python/Scikit-Learn antara Colab dan Streamlit Cloud.\n\n"
+        f"**Cara Mengatasi:** Di Streamlit Cloud klik **Manage app → Settings → ubah Python version ke 3.11**, lalu reboot app.\n\n"
+        f"Detail teknis: `{e}`"
+    )
     st.stop()
 
 try:
     df_hist, df_cat = fetch_realtime_gsheet(gsheet_id)
 except Exception as e:
-    st.warning("Masukkan ID Google Sheets yang valid di sidebar sebelah kiri dan pastikan aksesnya 'Anyone with the link'.")
+    st.warning("Gagal membaca Google Sheets. Pastikan aksesnya sudah diatur ke 'Anyone with the link' (Viewer).")
     st.stop()
 
 z_label = st.sidebar.selectbox("Target Service Level:", ["95% (Z=1.65)", "97.5% (Z=1.96)", "99% (Z=2.33)"], index=1)
@@ -88,25 +97,20 @@ for _, item in df_cat.iterrows():
     rid = item["reagent_id"]
     unit, dec = item["unit"], (2 if item["unit"] == "Liter" else 1)
     
-    # Ambil riwayat terbaru dari Google Sheets (termasuk input barusan dari Apps Script)
     sub = df_hist[df_hist["reagent_id"] == rid][["date", "usage"]].copy()
     sub = sub.groupby("date", as_index=False)["usage"].sum()
     
-    # Reindex kalender agar kontinu sampai tanggal transaksi terakhir
     full_idx = pd.date_range(start=sub["date"].min(), end=sub["date"].max(), freq="D")
     sub = sub.set_index("date").reindex(full_idx, fill_value=0.0).reset_index().rename(columns={"index": "date"})
     
-    # Buat kerangka 14 hari ke depan dari tanggal terakhir di Google Sheets
     fut_dates = pd.date_range(start=sub["date"].max() + pd.Timedelta(days=1), periods=horizon, freq="D")
     combined = pd.concat([sub, pd.DataFrame({"date": fut_dates, "usage": np.nan})], ignore_index=True)
     X_fut = build_features(combined, horizon).loc[fut_dates, f_cols]
     
-    # Prediksi langsung menggunakan model terlatih (.predict saja, super cepat!)
     q10 = np.round(np.maximum(0, models[rid][0.10].predict(X_fut)), dec)
     q50 = np.round(np.maximum(0, models[rid][0.50].predict(X_fut)), dec)
     q90 = np.round(np.maximum(0, models[rid][0.90].predict(X_fut)), dec)
     
-    # Hitung ulang kebutuhan order berdasarkan sisa stok terbaru di Master_Katalog
     st_val = float(item["current_stock"])
     lt_val, lt_std = int(item["lead_time"]), float(item["lt_std"])
     pack, cost, shelf = float(item["pack_size"]), float(item["unit_cost"]), int(item["shelf_life"])
@@ -143,7 +147,7 @@ df_proc = pd.DataFrame(proc_list)
 # 4. TAMPILAN DASHBOARD MONITORING REAL-TIME
 # ==============================================================================
 st.title("🧪 PTI Lab — Real-Time Reagent Monitoring & Forecasting")
-st.caption(f"Terhubung langsung ke Google Sheets | Tanggal Data Terakhir: **{df_hist['date'].max().strftime('%Y-%m-%d')}** | Menggunakan Model Pre-Trained (`pti_models_20.joblib`)")
+st.caption(f"Terhubung langsung ke Google Sheets | Tanggal Data Terakhir: **{df_hist['date'].max().strftime('%Y-%m-%d')}** | Model Pre-Trained Colab (`pti_models_20.joblib`)")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("🚨 Status KRITIS", f"{df_proc['Status'].str.contains('KRITIS').sum()} Item")
@@ -151,28 +155,37 @@ c2.metric("⚠️ Status WASPADA", f"{df_proc['Status'].str.contains('WASPADA').
 c3.metric("📦 Total Order", f"{df_proc['Order (Pack)'].sum()} Pack")
 c4.metric("💰 Estimasi Anggaran", f"Rp {df_proc['Biaya (Rp)'].sum():,.0f}")
 
-sel_info = df_proc[df_proc["ID"] == selected_id].iloc[0]
-hist_s = df_hist[df_hist["reagent_id"] == selected_id].tail(45)
-fore_s = forecasts[selected_id]
+tab1, tab2, tab3 = st.tabs(["📈 Monitoring & Prediksi Live", "📋 Keputusan Order (20 Reagen)", "🔬 Laporan Akurasi Model (Colab)"])
 
-col_chart1, col_chart2 = st.columns(2)
-with col_chart1:
-    fig1 = go.Figure()
-    fig1.add_trace(go.Scatter(x=hist_s["date"], y=hist_s["usage"], name="Aktual (Google Sheets)", line=dict(color="#1d4ed8", width=2.5)))
-    fig1.add_trace(go.Scatter(x=fore_s["date"], y=fore_s["q90"], line=dict(width=0), showlegend=False))
-    fig1.add_trace(go.Scatter(x=fore_s["date"], y=fore_s["q10"], name="Interval 80% (Q10-Q90)", fill="tonexty", fillcolor="rgba(245,158,11,0.25)", line=dict(width=0)))
-    fig1.add_trace(go.Scatter(x=fore_s["date"], y=fore_s["q50"], name="Prediksi Median (Q50)", line=dict(color="#d97706", width=3, dash="dash")))
-    fig1.update_layout(title=f"Prediksi Konsumsi: {sel_info['Nama Reagen']} ({sel_info['Satuan']}/hari)", height=360, margin=dict(t=40, b=20))
-    st.plotly_chart(fig1, use_container_width=True)
+with tab1:
+    sel_info = df_proc[df_proc["ID"] == selected_id].iloc[0]
+    hist_s = df_hist[df_hist["reagent_id"] == selected_id].tail(45)
+    fore_s = forecasts[selected_id]
 
-with col_chart2:
-    fig2 = go.Figure()
-    fig2.add_trace(go.Scatter(x=fore_s["date"], y=fore_s["stok_q50"], name="Sisa Stok Normal (Q50)", line=dict(color="#059669", width=3)))
-    fig2.add_trace(go.Scatter(x=fore_s["date"], y=fore_s["stok_q90"], name="Sisa Stok Lonjakan (Q90)", line=dict(color="#dc2626", dash="dot")))
-    fig2.add_hline(y=sel_info["ROP"], line_dash="dash", line_color="orange", annotation_text=f"ROP ({sel_info['ROP']})")
-    fig2.add_hline(y=0, line_color="red")
-    fig2.update_layout(title=f"Simulasi Stok Live ({sel_info['Stok Gudang Live']} {sel_info['Satuan']})", height=360, margin=dict(t=40, b=20))
-    st.plotly_chart(fig2, use_container_width=True)
+    col_chart1, col_chart2 = st.columns(2)
+    with col_chart1:
+        fig1 = go.Figure()
+        fig1.add_trace(go.Scatter(x=hist_s["date"], y=hist_s["usage"], name="Aktual (Google Sheets)", line=dict(color="#1d4ed8", width=2.5)))
+        fig1.add_trace(go.Scatter(x=fore_s["date"], y=fore_s["q90"], line=dict(width=0), showlegend=False))
+        fig1.add_trace(go.Scatter(x=fore_s["date"], y=fore_s["q10"], name="Interval 80% (Q10-Q90)", fill="tonexty", fillcolor="rgba(245,158,11,0.25)", line=dict(width=0)))
+        fig1.add_trace(go.Scatter(x=fore_s["date"], y=fore_s["q50"], name="Prediksi Median (Q50)", line=dict(color="#d97706", width=3, dash="dash")))
+        fig1.update_layout(title=f"Prediksi Konsumsi: {sel_info['Nama Reagen']} ({sel_info['Satuan']}/hari)", height=360, margin=dict(t=40, b=20))
+        st.plotly_chart(fig1, use_container_width=True)
 
-st.subheader("📋 Daftar Keputusan Pengadaan Real-Time (20 Reagen)")
-st.dataframe(df_proc.style.format({"Biaya (Rp)": "Rp {:,.0f}"}), use_container_width=True)
+    with col_chart2:
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(x=fore_s["date"], y=fore_s["stok_q50"], name="Sisa Stok Normal (Q50)", line=dict(color="#059669", width=3)))
+        fig2.add_trace(go.Scatter(x=fore_s["date"], y=fore_s["stok_q90"], name="Sisa Stok Lonjakan (Q90)", line=dict(color="#dc2626", dash="dot")))
+        fig2.add_hline(y=sel_info["ROP"], line_dash="dash", line_color="orange", annotation_text=f"ROP ({sel_info['ROP']})")
+        fig2.add_hline(y=0, line_color="red")
+        fig2.update_layout(title=f"Simulasi Stok Live ({sel_info['Stok Gudang Live']} {sel_info['Satuan']})", height=360, margin=dict(t=40, b=20))
+        st.plotly_chart(fig2, use_container_width=True)
+
+with tab2:
+    st.dataframe(df_proc.style.format({"Biaya (Rp)": "Rp {:,.0f}"}), use_container_width=True)
+
+with tab3:
+    if "evaluation" in artifact:
+        st.dataframe(artifact["evaluation"], use_container_width=True)
+    else:
+        st.info("Tabel evaluasi tidak disertakan di dalam artefak model ini.")
