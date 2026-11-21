@@ -15,7 +15,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-DEFAULT_GSHEET_ID = "1BRbB4ucQJffZbDmAevURXK9zRn8sNe43"
+DEFAULT_GSHEET_ID = "1nS2RUpMSLa7h4jCk5vKKLtr0HzUV0YBBauyEmuOZyFE"
 MODEL_PATH = "pti_models_20.joblib"
 
 # ==============================================================================
