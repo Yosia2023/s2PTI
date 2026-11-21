@@ -47,7 +47,7 @@ def build_features(df_sub, horizon=14):
     return d
 
 # ==============================================================================
-# 2. FUNGSI PELATIHAN ULANG MANUAL (DIPANGGIL HANYA SAAT TOMBOL DIKLIK)
+# 2. FUNGSI PELATIHAN ULANG MANUAL & PENYESUAIAN VERSI SERVER
 # ==============================================================================
 def retrain_and_save_models(df_hist, df_cat, horizon=14):
     f_cols = [
@@ -133,7 +133,8 @@ except Exception as e:
 
 latest_gsheet_date = df_hist["date"].max()
 
-# Eksekusi pelatihan HANYA jika file model belum ada sama sekali ATAU tombol 'Latih Ulang' diklik
+# Eksekusi pelatihan HANYA jika file model belum ada, tombol 'Latih Ulang' diklik,
+# ATAU terjadi ketidakcocokan versi scikit-learn antara Colab dan Streamlit Cloud
 if not os.path.exists(MODEL_PATH):
     with st.spinner("⏳ File pti_models_20.joblib belum ditemukan. Melatih model perdana dari Google Sheets..."):
         artifact = retrain_and_save_models(df_hist, df_cat, horizon=14)
@@ -145,7 +146,12 @@ elif retrain_clicked:
         artifact = retrain_and_save_models(df_hist, df_cat, horizon=14)
     st.toast("✅ Model pti_models_20.joblib berhasil diperbarui!", icon="✅")
 else:
-    artifact = joblib.load(MODEL_PATH)
+    try:
+        artifact = joblib.load(MODEL_PATH)
+    except Exception:
+        with st.spinner("🔄 Menyesuaikan versi model dengan server Streamlit Cloud (melatih ulang dari Google Sheets)..."):
+            artifact = retrain_and_save_models(df_hist, df_cat, horizon=14)
+        st.toast("✅ Model berhasil disesuaikan dengan lingkungan Streamlit Cloud!", icon="✅")
 
 st.sidebar.info(
     f"**Status Otak Model (`pti_models_20.joblib`):**\n"
